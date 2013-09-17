@@ -1,0 +1,304 @@
+#!/usr/bin/env coffee
+
+die = ( message )->
+  console.error "\n#{message}"
+  process.exit(1)
+
+fs     = require 'fs'
+Path   = require 'path'
+try
+  optimist = require 'optimist'
+  Canvas   = require 'canvas'
+catch E
+  die "Missing dependencies, please run:\n\n  npm install\n"
+
+Image  = require( 'canvas').Image
+# http://codeincomplete.com/posts/2011/5/7/bin_packing/
+GrowingPacker = require './growingpacker' 
+
+argv = optimist
+      .usage('Build sprite sheet and image file from folder of images.\nUsage: $0')
+      .demand(['s','r','o'])
+      .alias('s','source')
+      .describe('s', 'Gets source images from this folder')
+      .alias('r','retina')
+      .describe('r', 'Gets source retina images from this folder')  
+      .alias('o','output')
+      .describe('o', 'Outputs files to this folder')  
+      .alias('f','filename')
+      .describe('f', 'Filename to use for CSS and spritesheet (distinction made by file extension)')  
+      .default('f', 'sprites')
+      .alias('p','prefix')
+      .describe('p', 'CSS class to use as prefix for sprites.')
+      .default('p', 'sprite')
+      .alias('m','bymax')
+      .describe('m','Sort by max(width,height) before packing (otherwise sorts by greatest height first)')
+      .boolean('m')
+      .default('m', true ).argv
+  
+
+Array::compare = (array) ->
+  return false  unless array
+  return false  unless @length is array.length
+  i = 0
+  while i < @length
+    if this[i] instanceof Array and array[i] instanceof Array
+      return false  unless this[i].compare(array[i])
+    else return false  unless this[i] is array[i]
+    i++
+  true
+  
+
+sources = fs.readdirSync( Path.resolve process.cwd(), argv.s )
+retinas = fs.readdirSync( Path.resolve process.cwd(), argv.r )
+outpath = Path.resolve process.cwd(), argv.o
+if !fs.existsSync outpath then fs.mkdirSync outpath
+sourceImagePath = Path.join( outpath, "#{argv.f}.png" )
+retinaImagePath = Path.join( outpath, "#{argv.f}-retina.png" )
+stylesheetPath = Path.join( outpath, "#{argv.f}.css" )
+htmlPath = Path.join( outpath, "#{argv.f}.html" )
+
+if !sources.compare( retinas ) 
+  die "Sources folder (#{argv.s}) does not have the same filenames or total files as retina images folder (#{argv.s})!" 
+
+unless fs.existsSync outpath
+  fs.mkdirSync outpath
+
+
+loadSources = ( sources, folder  )->
+  path = Path.resolve( process.cwd(), folder )
+  return sources.map ( source )->  
+    name = Path.basename source, Path.extname source 
+    data = 
+      name: name
+      cssname: if argv.p then "#{argv.p}-#{name}" else name
+      filename: source
+    data.filepath = Path.join path, source
+    data.image = new Image()
+    data.image.src = fs.readFileSync data.filepath
+    return data
+
+sizeUpImage = ( image, width, height )->
+  canvas = new Canvas width, height
+  context = canvas.getContext '2d'
+  x = (width - image.width)/2
+  y = (height - image.height)/2
+  context.drawImage image, x, y
+  image = new Image()
+  image.src = canvas.toBuffer()
+  return image
+
+fixDimensions = ( sources, retinas )->
+  sources.map ( source, index )->
+    source = sources[index]
+    retina = retinas[index]
+    retinaImage = retina.image
+    sourceImage = source.image
+    retinaTargetWidth = Math.ceil(retinaImage.width/4)*4
+    retinaTargetHeight = Math.ceil(retinaImage.height/4)*4
+    sourceTargetWidth = retinaTargetWidth/4
+    sourceTargetHeight = retinaTargetHeight/4
+    retina.image = sizeUpImage retinaImage, retinaTargetWidth, retinaTargetHeight
+    source.image = sizeUpImage sourceImage, sourceTargetWidth, sourceTargetHeight
+    
+  
+
+sortByGreatestHeightFirst = ( a, b )->
+  aHeight = a.image.height
+  bHeight  = b.image.height
+  if aHeight > bHeight then -1 else if aHeight > bHeight then 1 else 0
+  
+sortByMax = ( a, b )->
+  aSize = Math.max(a.image.width,a.image.height)
+  bSize = Math.max(b.image.width,b.image.height)
+  if aSize > bSize then -1 else if aSize < bSize then 1 else 0
+
+filterExcluded = ( item )->
+  !item.fit || (item.fit && !item.fit.used)
+   
+makePackable = ( data )->
+  data.map ( a )->
+    a.w = a.image.width
+    a.h = a.image.height
+
+console.log "Loading sources..."
+sourceData = loadSources sources, argv.s
+retinaData = loadSources retinas, argv.r
+
+console.log "Fixing Dimensions..."
+fixDimensions( sourceData, retinaData )
+
+console.log "Verifying Dimension Integrity..."
+
+uneven = []
+sourceData.forEach ( item, index )->
+  source = sourceData[index]
+  retina = retinaData[index]
+  if retina.image.width != source.image.width*4
+    uneven.push "uneven width for \"#{source.name}\" sourceWidth: #{source.image.width}  retinaWidth: #{retina.image.width}.  #{source.image.width}*4 = #{source.image.width*4} (#{source.filepath})"
+  if retina.image.height != source.image.height*4
+    uneven.push "uneven height for \"#{source.name}\" sourceHeight: #{source.image.height} retinaHeight: #{retina.image.height}. #{source.image.height}*4 = #{source.image.height*4} (#{source.filepath})"
+if uneven.length
+  console.log "\nCould not proceed!!! Please verify your source extraction process in photoshop."
+  console.log "====================\n"
+  die "\n#{uneven.length} uneven retina images out of #{sourceData.length}!\n - #{uneven.join("\n - ")}"
+    
+
+console.log "Sorting by #{if argv.m then 'max(width,height)' else 'greatest height first'}..."
+if argv.m
+  sourceData.sort sortByMax
+  retinaData.sort sortByMax
+else
+  sourceData.sort sortByGreatestHeightFirst
+  retinaData.sort sortByGreatestHeightFirst
+    
+console.log "Making objects packable..."
+makePackable sourceData
+makePackable retinaData
+
+console.log "Packing measures..."
+sourcePacker = new GrowingPacker()  
+retinaPacker = new GrowingPacker()
+
+sourcePacker.fit sourceData
+retinaPacker.fit retinaData
+  
+console.log "Checking for unused objects..."
+unusedSources = sourceData.filter filterExcluded
+unusedRetinas = retinaData.filter filterExcluded
+
+if unusedSources.length
+  die "Some Images couldn't be packed! \n-#{unusedSources.map((s)->s.filepath).join("\n-")}"
+
+if unusedRetinas.length
+  die "Some Retina Images couldn't be packed! \n-#{unusedRetinas.map((s)->s.filepath).join("\n-")}"
+
+console.log "Preparing canvases..."
+sourceCanvasWidth=0
+sourceCanvasHeight=0
+
+retinaCanvasWidth=0
+retinaCanvasHeight=0
+
+sourceData.forEach ( data )->
+  fit = data.fit
+  width = fit.x + fit.w
+  height =  fit.y + fit.h
+  if width > sourceCanvasWidth then sourceCanvasWidth = width
+  if height > sourceCanvasHeight then sourceCanvasHeight = height
+  
+retinaData.forEach ( data )->
+  fit = data.fit
+  width  = fit.x + fit.w
+  height = fit.y + fit.h
+  if width > retinaCanvasWidth then retinaCanvasWidth = width
+  if height > retinaCanvasHeight then retinaCanvasHeight = height
+  
+if sourceCanvasWidth*4 != retinaCanvasWidth
+  die "Retina canvas width is not 4 times multiple of source canvas width!"
+if sourceCanvasHeight*4 != retinaCanvasHeight
+  die "Retina canvas height is not 4 times multiple of source canvas height!"
+
+sourceCanvas = new Canvas sourceCanvasWidth, sourceCanvasHeight 
+retinaCanvas = new Canvas retinaCanvasWidth, retinaCanvasHeight 
+
+sourceContext = sourceCanvas.getContext '2d'
+retinaContext = retinaCanvas.getContext '2d'
+
+console.log 'Drawing source sprites...'
+sourceData.forEach ( source )->
+  {fit,image} = source
+  sourceContext.drawImage image, fit.x, fit.y
+  
+console.log 'Drawing retina sprites...'
+retinaData.forEach ( source )->
+  {fit,image} = source
+  retinaContext.drawImage image, fit.x, fit.y
+
+stylesheet="
+\n.#{argv.p}{
+\n display:inline-block;
+\n background-image:url(\"#{argv.f}.png\");
+\n background-repeat:no-repeat;
+\n background-position:0 0;
+\n overflow:hidden;
+\n}
+\n@media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi){
+\n .#{argv.p}{
+\n  background-image:url(\"#{argv.f}-retina.png\");
+\n  background-size:#{sourceCanvasWidth}px #{sourceCanvasHeight}px;
+\n }    
+\n}\n
+"
+
+html_pre = "
+\n<!doctype html>
+\n<html lang=\"en\">
+\n<head>
+\n <meta charset=\"utf-8\">
+\n <title>Sprite Sheet Preview</title>
+\n <link rel=\"stylesheet\" href=\"#{argv.f}.css\">
+\n <style>
+\n  *, *:before, *:after {-moz-box-sizing: border-box; -webkit-box-sizing: border-box; box-sizing: border-box;}
+\n  table{width:100%;}
+\n  .dark, .light {transition:all 2s .1s;position:relative;height: 50%;width: 100%;display:inline-block;text-align:center;padding:10px;}
+\n  .dark:hover{background:#000;}
+\n  .dark{background:rgba(0,0,0,0.3);}
+\n  .light{background:#fff;}
+\n  .sprite{position:absolute;top:50%;left:50%;}
+\n  h3{font-family:sans-serif;color:#ccc;}
+\n  pre{background:#fff;padding-left:1em;}
+\n  pre code{font-family:monospace;color:#999;}
+\n  pre:hover code{transition:all 2s .1s;color:#000;}
+\n  td{border-bottom:2px dashed #ccc;}
+\n </style>
+\n</head>
+\n<body>
+"
+html_aft="</body></html>"
+
+console.log "Creating Stylesheet..."
+rules = [ stylesheet ]
+sourceData.forEach ( source )->
+  rules.push ".#{source.cssname}{background-position:-#{source.fit.x}px -#{source.fit.y}px; width:#{source.image.width}px; height:#{source.image.height}px; }"
+
+
+console.log "Creating HTML example..."
+html = ["<table>"]
+sourceData.forEach ( source )->
+  html.push "<tr>
+    <td class=\"preview\"  style=\"width:#{source.image.width+10}px;height:#{(source.image.height*2)+20}px;\">
+      <div class=\"dark\"><i style=\"
+        margin-left:-#{source.image.width/2}px;
+        margin-top:-#{source.image.height/2}px;
+        \" class=\"#{argv.p} #{source.cssname}\"></i></div>
+      <div class=\"light\"><i style=\"
+        margin-left:-#{(source.image.width/2)}px;
+        margin-top:-#{(source.image.height/2)}px;
+        \" class=\"#{argv.p} #{source.cssname}\"></i></div>      
+    </td>
+    <td class=\"code\">
+      <h3>HTML</h3>
+      <pre class=\"html\"><code>\n&lt;i class=\"#{argv.p} #{source.cssname}\"&gt;&lt;/i&gt;\n</code></pre>
+      <h3>SLIM</h3>      
+      <pre class=\"slim\"><code>\ni.#{argv.p}.#{source.cssname}\n</code></pre>      
+      <h3>CSS</h3>      
+      <pre class=\"css\"><code>\n.#{source.cssname}{\n   background-position:-#{source.fit.x}px -#{source.fit.y}px;\n   width:#{source.image.width}px;\n   height:#{source.image.height}px;\n}\n</code></pre>
+    </td>
+  </tr>"
+html.push "</table>"
+
+console.log "Writing #{sourceImagePath}..."
+fs.writeFileSync sourceImagePath, sourceCanvas.toBuffer()
+
+console.log "Writing #{retinaImagePath}..."
+fs.writeFileSync retinaImagePath, retinaCanvas.toBuffer()
+
+console.log "Writing #{stylesheetPath}..."
+fs.writeFileSync stylesheetPath, rules.join('\n')
+
+console.log "Writing #{htmlPath}..."
+fs.writeFileSync htmlPath, "#{html_pre}#{html.join('\n')}#{html_aft}"
+
+console.log "Done!"
+

@@ -1,0 +1,15 @@
+{
+  "name": "spritz",
+  "version": "0.0.1",
+  "description": "Spritz grabs images in folders and makes a sprite sheet.",
+  "main": "growingpacker.js",
+  "dependencies": {
+    "canvas": "~1.1.0",
+    "optimist": "~0.6.0"
+  },
+  "devDependencies": {},
+  "scripts": {},
+  "repository": "",
+  "author": "",
+  "license": "MIT"
+}
